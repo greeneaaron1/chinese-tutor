@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chinese-tutor"
+version = "0.1.0"
+description = "Local-first CLI for chatting with an ElevenLabs Agent and lightweight vocab review."
+authors = [
+  { name = "chinese-tutor maintainers" }
+]
+requires-python = ">=3.11"
+dependencies = [
+  "elevenlabs[pyaudio]>=1.9.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/aarongreene/chinese-tutor"
+
+[tool.setuptools.packages.find]
+where = ["src"]
