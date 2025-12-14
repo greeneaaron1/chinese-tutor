@@ -1,11 +1,6 @@
 # chinese-tutor
 
-Minimal, local-first CLI for daily Mandarin conversation with an existing ElevenLabs Agent plus a tiny vocab review loop.
-
-## Official docs (browsed)
-- ElevenLabs Agents overview: https://elevenlabs.io/docs/agents-platform/overview
-- ElevenLabs Python SDK (Conversation helper + DefaultAudioInterface): https://elevenlabs.io/docs/agents-platform/libraries/python
-- ElevenLabs conversational Python example repo: https://github.com/elevenlabs/elevenlabs-examples/tree/main/examples/conversational-ai/python
+Minimal, local-first CLI for daily Mandarin conversation with an AI agent plus a tiny vocab review loop.
 
 ## Requirements
 - Python 3.11+
