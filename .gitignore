@@ -4,8 +4,10 @@ __pycache__/
 .env
 .venv/
 .pytest_cache/
+.mypy_cache/
 build/
 dist/
 *.egg-info/
 /.idea/
 /.vscode/
+evi-env/
