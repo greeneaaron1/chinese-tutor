@@ -303,7 +303,7 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
   <div class="page">
     <section class="hero">
       <h1>Chinese Tutor Control Room</h1>
-      <p class="lead">Stream live transcripts, run the CLI without a terminal, and keep your ElevenLabs Agent close at hand.</p>
+      <p class="lead">Stream live transcripts, run the CLI without a terminal, and talk to a Chinese tutor.</p>
       <div class="badges">
         <span class="badge">Agent ID: {html.escape(agent_id_hint) or "not configured"}</span>
         <span class="badge">AGENT_ID { "ready" if agent_id_ready else "missing" }</span>
