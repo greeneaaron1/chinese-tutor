@@ -2,6 +2,8 @@
 
 Local-first Mandarin practice with your ElevenLabs Agent. Start a voice chat, read the transcript, and keep a clean list of vocab to review later.
 
+Minimal, local-first CLI for daily Mandarin conversation with an AI agent plus a tiny vocab review loop.
+
 ## Official docs (browsed)
 - ElevenLabs Agents overview: https://elevenlabs.io/docs/agents-platform/overview
 - ElevenLabs Python SDK (Conversation helper + DefaultAudioInterface): https://elevenlabs.io/docs/agents-platform/libraries/python
