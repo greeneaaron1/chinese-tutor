@@ -1,6 +1,6 @@
 # chinese-tutor
 
-Minimal, local-first CLI for daily Mandarin conversation with an existing ElevenLabs Agent plus a tiny vocab review loop.
+Local-first Mandarin practice with your ElevenLabs Agent. Start a voice chat, read the transcript, and keep a clean list of vocab to review later.
 
 ## Official docs (browsed)
 - ElevenLabs Agents overview: https://elevenlabs.io/docs/agents-platform/overview
@@ -28,32 +28,28 @@ cp .env.example .env
 
 **Important:** The `pip install -e .` step is required for both CLI and web app usage. It installs the package in editable mode so Python can import the `chinese_tutor` module.
 
-## Usage
+## Usage (CLI)
 All commands run locally; data is stored in SQLite at `~/.chinese-tutor/chinese_tutor.db` (override with `CHINESE_TUTOR_DB_PATH`).
 
 ```bash
 # Live voice chat with your agent (Ctrl+C to end)
 python -m chinese_tutor chat
 
-# Quick vocab quiz
-python -m chinese_tutor review
-
-# Show recent sessions + vocab
-python -m chinese_tutor list
+# Show the saved vocab list (newest first)
+python -m chinese_tutor list --limit 20
 
 # Make targets (optional)
 make chat
-make review
 make list
 make web    # Start web UI server
 ```
 
 ## Web UI (streaming)
-**Prerequisites:** Make sure you've completed the setup steps above, especially `pip install -e .`. The package must be installed for the module to be importable.
+**Prerequisites:** complete the setup steps above, especially `pip install -e .` so the `chinese_tutor` module is importable.
 
 - Launch: `uvicorn chinese_tutor.web:app --host 0.0.0.0 --port 3000`
   - Or use the Makefile: `make web` (runs on port 3000)
-- Features: start a live chat with real-time transcript streaming, run CLI commands without a terminal, and view status/output in the browser.
+- Features: start/stop a live chat, watch the transcript stream, and see all captured vocab (Chinese, pinyin, English, example) in a single dark view.
 - Requirements: `.env` with `AGENT_ID` (and optionally `ELEVENLABS_API_KEY` for private agents) plus working mic/speakers on the machine running the server.
 
 ## What happens during `chat`
@@ -63,12 +59,7 @@ make web    # Start web UI server
 - Extracts vocab candidates:
   - Primary: parses any agent “快速复习一下…” vocab check lines like `1) 超市 (chāoshì) — grocery store — 例句：…`
   - Fallback: captures English phrases you said mid-sentence.
-  - Stored fields: english, chinese, pinyin, example, plus review stats.
-
-## Review logic (MVP)
-- Each vocab row tracks `seen_count`, `last_seen_at`, `last_result` (`pass`/`fail`).
-- Review prefers items you failed most recently, otherwise least recently seen.
-- Prompts are minimal: press `p` to pass, `f` to mark fail, `q` to stop.
+  - Stored fields: english, chinese, pinyin, example.
 
 ## Data layout
 SQLite lives at `~/.chinese-tutor/chinese_tutor.db` (or `CHINESE_TUTOR_DB_PATH`):

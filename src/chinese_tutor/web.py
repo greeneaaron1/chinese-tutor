@@ -1,26 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import html
 import json
+import logging
 import os
-import shlex
 import threading
 from dataclasses import dataclass
-from io import StringIO
-from typing import Any, AsyncGenerator, Dict, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Tuple
 
-import python_multipart  # Imported so pip installs the dependency
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 
-from . import cli
+from . import extract, storage
 from .elevenlabs_client import run_conversation
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 app = FastAPI()
 app.state.active_chat = None
 
@@ -31,35 +29,29 @@ class ActiveChat:
     worker: threading.Thread
 
 
-def _run_cli(args_text: str) -> Tuple[str, int]:
-    argv = shlex.split(args_text) if args_text else []
-    buffer = StringIO()
-    exit_code = 0
-    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-        try:
-            cli.main(argv)
-        except SystemExit as exc:
-            code = exc.code
-            if isinstance(code, int):
-                exit_code = code
-            elif code is None:
-                exit_code = 0
-            else:
-                exit_code = 1
-        except Exception as exc:  # noqa: BLE001
-            buffer.write(f"Error: {exc}\n")
-            exit_code = 1
-    return buffer.getvalue(), exit_code
-
-
 def _format_sse(payload: Dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _mask_agent_id(agent_id: str | None) -> str:
-    if not agent_id:
-        return ""
-    return f"{agent_id[:4]}...{agent_id[-4:]}" if len(agent_id) > 8 else agent_id
+def _persist_conversation(result) -> Tuple[int | None, List[Dict[str, str]]]:
+    """
+    Save the conversation transcript + vocab to SQLite.
+    Returns session id and list of vocab dicts.
+    """
+    try:
+        session_id = storage.record_session(
+            started_at=result.started_at,
+            ended_at=result.ended_at,
+            transcript_text=result.transcript_text,
+            metadata=result.metadata,
+        )
+        vocab_items = extract.extract_unknown_words(agent_text=result.agent_text, user_text=result.user_text)
+        if vocab_items:
+            storage.insert_vocab_items(vocab_items, source_session_id=session_id)
+        return session_id, vocab_items
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to persist conversation: %s", exc)
+        return None, []
 
 
 def _start_chat_stream(
@@ -85,11 +77,20 @@ def _start_chat_stream(
                 stop_event=stop_event,
                 install_signal_handlers=False,
             )
+            session_id, vocab_items = _persist_conversation(result)
+            if session_id:
+                push({"type": "status", "message": "Saved session locally."})
+            if vocab_items:
+                push({"type": "status", "message": f"Captured {len(vocab_items)} vocab items."})
+            if vocab_items:
+                push({"type": "vocab", "items": vocab_items})
             push(
                 {
                     "type": "done",
                     "exit_code": 0,
                     "conversation_id": result.metadata.get("conversation_id"),
+                    "session_id": session_id,
+                    "vocab_count": len(vocab_items),
                     "started_at": result.started_at.isoformat(),
                     "ended_at": result.ended_at.isoformat(),
                 }
@@ -111,90 +112,102 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Chinese Tutor Control Room</title>
+  <title>Chinese Tutor</title>
   <style>
     :root {{
-      --bg: #030712;
-      --card: #0d1627;
-      --card-strong: #0a1020;
-      --accent: #22d3ee;
-      --accent-2: #f97316;
-      --text: #e5e7eb;
-      --muted: #9ca3af;
-      --border: rgba(255,255,255,0.08);
-      --shadow: 0 25px 60px rgba(0,0,0,0.35);
-      --radius: 16px;
-      font-family: "Space Grotesk", "Inter", "Segoe UI", "SF Pro Display", sans-serif;
+      --bg: #010101;
+      --panel: #0b0b0f;
+      --panel-2: #111118;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --border: rgba(255,255,255,0.18);
+      --border-strong: rgba(255,255,255,0.4);
+      --shadow: 0 28px 120px rgba(0,0,0,0.7);
+      --radius: 18px;
+      font-family: "Manrope", "Inter", "SF Pro Display", "Segoe UI", sans-serif;
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      background: radial-gradient(circle at 20% 20%, #0a1628 0%, #050b16 40%, #020610 100%);
+      background: radial-gradient(circle at 18% 18%, #0f0f16 0%, #020202 50%, #000 100%);
       color: var(--text);
       min-height: 100vh;
     }}
     .page {{
-      max-width: 1100px;
+      max-width: 960px;
       margin: 0 auto;
-      padding: 32px 20px 48px;
+      padding: 32px 20px 60px;
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      gap: 16px;
     }}
     .hero {{
-      background: linear-gradient(135deg, rgba(34, 211, 238, 0.12), rgba(249, 115, 22, 0.12));
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 20px 22px;
+      border-radius: var(--radius);
       border: 1px solid var(--border);
+      background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
       box-shadow: var(--shadow);
-      border-radius: 20px;
-      padding: 24px;
     }}
-    h1 {{
-      font-size: 30px;
-      margin: 0 0 8px;
-      letter-spacing: -0.02em;
+    .title {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }}
-    p.lead {{
-      margin: 0 0 12px;
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 12px;
       color: var(--muted);
     }}
-    .badges {{
+    h1 {{
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: -0.01em;
+    }}
+    .lead {{
+      margin: 0;
+      color: var(--muted);
+      max-width: 640px;
+      line-height: 1.6;
+    }}
+    .controls {{
       display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
+      align-items: flex-end;
       gap: 10px;
-      margin: 10px 0 16px;
+      min-width: 220px;
     }}
-    .badge {{
-      padding: 8px 12px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      font-size: 12px;
-      letter-spacing: 0.01em;
-    }}
-    .actions {{
+    .button-row {{
       display: flex;
-      gap: 12px;
+      gap: 10px;
       flex-wrap: wrap;
-      align-items: center;
     }}
     button {{
-      border: none;
       cursor: pointer;
       padding: 12px 16px;
       border-radius: 12px;
-      font-weight: 600;
+      font-weight: 700;
       letter-spacing: 0.01em;
-      transition: transform 120ms ease, box-shadow 160ms ease, background 160ms ease;
+      border: 1px solid var(--border-strong);
+      background: #0f0f16;
+      color: var(--text);
+      transition: transform 120ms ease, box-shadow 160ms ease, border-color 120ms ease, background 140ms ease;
     }}
     button.primary {{
-      background: linear-gradient(120deg, #22d3ee, #0ea5e9);
-      color: #041019;
-      box-shadow: 0 10px 30px rgba(34, 211, 238, 0.25);
+      background: #ffffff;
+      color: #000;
+      border-color: #ffffff;
     }}
     button.secondary {{
       background: rgba(255,255,255,0.06);
       color: var(--text);
-      border: 1px solid var(--border);
+    }}
+    button:hover:not(:disabled) {{
+      transform: translateY(-1px);
+      box-shadow: 0 14px 38px rgba(0,0,0,0.45);
     }}
     button:disabled {{
       opacity: 0.55;
@@ -202,161 +215,156 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
       transform: none;
       box-shadow: none;
     }}
-    button:hover:not(:disabled) {{
-      transform: translateY(-1px);
-      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+    .status {{
+      font-size: 14px;
+      color: var(--muted);
+      text-align: right;
     }}
-    .grid {{
-      display: grid;
-      gap: 14px;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    .pill-row {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .pill {{
+      padding: 8px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.02em;
     }}
     .card {{
-      background: var(--card);
+      background: var(--panel);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       padding: 18px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 14px;
     }}
     .card h2 {{
       margin: 0;
-      font-size: 18px;
+      font-size: 20px;
       letter-spacing: -0.01em;
     }}
-    label {{
-      font-size: 14px;
+    .transcript, .vocab {{
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      min-height: 260px;
+      max-height: 440px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .line {{
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+    }}
+    .line strong {{
+      font-weight: 800;
+      margin-right: 8px;
+    }}
+    .line.agent strong {{
+      color: #fff;
+    }}
+    .muted {{
       color: var(--muted);
     }}
-    input[type="text"] {{
-      width: 100%;
+    .vocab-item {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 4px;
       padding: 12px;
-      border-radius: 10px;
+      border-radius: 12px;
       border: 1px solid var(--border);
-      background: var(--card-strong);
-      color: var(--text);
+      background: rgba(255,255,255,0.03);
+    }}
+    .vocab-top {{
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }}
+    .hanzi {{
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }}
+    .pinyin {{
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    .english {{
       font-size: 15px;
     }}
-    .output, .transcript {{
-      background: var(--card-strong);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px;
-      font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", monospace;
-      white-space: pre-wrap;
-      min-height: 180px;
-      max-height: 360px;
-      overflow: auto;
-    }}
-    .chips {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }}
-    .chip {{
-      padding: 8px 10px;
-      background: rgba(255,255,255,0.07);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      font-size: 13px;
-      cursor: pointer;
-      transition: background 140ms ease;
-    }}
-    .chip:hover {{
-      background: rgba(255,255,255,0.12);
-    }}
-    .transcript-line {{
-      margin: 0 0 8px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid var(--border);
-    }}
-    .transcript-line .who {{
-      font-weight: 700;
-      color: var(--accent);
-      margin-right: 6px;
-    }}
-    .transcript-line.agent .who {{ color: var(--accent-2); }}
-    .pill-list {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 8px;
-    }}
-    .pill {{
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: rgba(255,255,255,0.05);
-      border: 1px dashed var(--border);
-      font-size: 13px;
-      color: var(--muted);
-    }}
     @media (max-width: 720px) {{
-      .actions {{ flex-direction: column; align-items: flex-start; }}
-      button {{ width: 100%; text-align: center; }}
+      .hero {{
+        flex-direction: column;
+        align-items: flex-start;
+      }}
+      .controls {{
+        width: 100%;
+        align-items: flex-start;
+      }}
+      .status {{
+        text-align: left;
+      }}
+      button {{
+        width: auto;
+      }}
     }}
   </style>
 </head>
 <body>
   <div class="page">
     <section class="hero">
-      <h1>Chinese Tutor Control Room</h1>
-      <p class="lead">Stream live transcripts, run the CLI without a terminal, and keep your ElevenLabs Agent close at hand.</p>
-      <div class="badges">
-        <span class="badge">Agent ID: {html.escape(agent_id_hint) or "not configured"}</span>
-        <span class="badge">AGENT_ID { "ready" if agent_id_ready else "missing" }</span>
-        <span class="badge">API key { "ready" if api_key_ready else "optional / missing" }</span>
-      </div>
-      <div class="actions">
-        <button class="primary" id="start-chat">Start Live Chat</button>
-        <button class="secondary" id="stop-chat" disabled>Stop</button>
-        <button class="secondary" id="clear-log">Clear log</button>
-      </div>
-    </section>
-
-    <section class="grid">
-      <div class="card">
-        <h2>CLI runner</h2>
-        <label for="args">Command (runs locally with your .env)</label>
-        <form id="command-form">
-          <input type="text" id="args" name="args" autocomplete="off" placeholder="chat | list --limit 5 | review --limit 3" />
-          <div class="actions" style="margin-top: 12px;">
-            <button type="submit" class="primary">Run command</button>
-          </div>
-        </form>
-        <div class="chips">
-          <div class="chip" data-fill="list --limit 10">list --limit 10</div>
-          <div class="chip" data-fill="chat">chat (voice)</div>
-          <div class="chip" data-fill="review --limit 5">review --limit 5</div>
-        </div>
-        <div class="pill-list">
-          <div class="pill">chat: live voice session with the agent</div>
-          <div class="pill">list: show recent sessions + vocab</div>
-          <div class="pill">review: interactive quiz (best in terminal)</div>
+      <div class="title">
+        <div class="eyebrow">Chinese Tutor</div>
+        <h1>Live Mandarin chat with instant transcripts.</h1>
+        <p class="lead">Press start to begin speaking with your ElevenLabs Agent. Everything is saved locally so you can review the vocab any time.</p>
+        <div class="pill-row">
+          <span class="pill">Agent: {html.escape(agent_id_hint or "not configured")}</span>
+          <span class="pill">AGENT_ID { "ready" if agent_id_ready else "missing" }</span>
+          <span class="pill">API key { "ready" if api_key_ready else "optional" }</span>
         </div>
       </div>
-      <div class="card">
-        <h2>Live transcript</h2>
-        <div id="transcript" class="transcript"></div>
+      <div class="controls">
+        <div class="button-row">
+          <button class="primary" id="start-chat">Start chat</button>
+          <button class="secondary" id="stop-chat" disabled>Stop</button>
+        </div>
+        <div class="status" id="status">Waiting to start</div>
       </div>
     </section>
 
     <section class="card">
-      <h2>Output</h2>
-      <div id="output" class="output"></div>
+      <h2>Transcript</h2>
+      <div id="transcript" class="transcript"></div>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <h2 style="margin:0;">Vocabulary to review</h2>
+        <button class="secondary" id="refresh-vocab">Refresh list</button>
+      </div>
+      <div id="vocab" class="vocab"></div>
     </section>
   </div>
 
   <script>
-    const outputEl = document.getElementById("output");
     const transcriptEl = document.getElementById("transcript");
+    const vocabEl = document.getElementById("vocab");
     const startBtn = document.getElementById("start-chat");
     const stopBtn = document.getElementById("stop-chat");
-    const clearBtn = document.getElementById("clear-log");
-    const form = document.getElementById("command-form");
-    const argsInput = document.getElementById("args");
+    const statusEl = document.getElementById("status");
+    const refreshBtn = document.getElementById("refresh-vocab");
     let chatSource = null;
 
     const envConfig = {json.dumps({
@@ -365,16 +373,14 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
         "agent_hint": agent_id_hint,
     })}
 
-    function appendOutput(line) {{
-      const now = new Date().toLocaleTimeString();
-      outputEl.textContent += `[${{now}}] ${{line}}\n`;
-      outputEl.scrollTop = outputEl.scrollHeight;
-    }}
-
     function appendTranscript(who, text) {{
       const div = document.createElement("div");
-      div.className = "transcript-line " + (who === "Agent" ? "agent" : "user");
-      div.innerHTML = `<span class="who">${{who}}:</span> ${{text}}`;
+      div.className = "line " + (who === "Agent" ? "agent" : "user");
+      const whoEl = document.createElement("strong");
+      whoEl.textContent = `${{who}}:`;
+      const textEl = document.createElement("span");
+      textEl.textContent = ` ${{text}}`;
+      div.append(whoEl, textEl);
       transcriptEl.appendChild(div);
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }}
@@ -384,33 +390,39 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
       stopBtn.disabled = !active;
     }}
 
+    function setStatus(text) {{
+      statusEl.textContent = text;
+    }}
+
     function closeChatSource() {{
       if (chatSource) {{
         chatSource.close();
         chatSource = null;
       }}
       setChatButtons(false);
+      setStatus("Ready when you are.");
     }}
 
     function startChat() {{
       if (!envConfig.agent_ready) {{
-        appendOutput("AGENT_ID missing. Set it in your .env before chatting.");
+        setStatus("AGENT_ID missing. Set it in your .env before chatting.");
         return;
       }}
       closeChatSource();
       setChatButtons(true);
-      appendOutput("Starting live chat with agent " + (envConfig.agent_hint || ""));
+      transcriptEl.innerHTML = "";
+      setStatus("Connecting to your agent...");
       chatSource = new EventSource("/stream/chat");
       chatSource.onmessage = (event) => {{
         try {{
           const data = JSON.parse(event.data);
           handleChatEvent(data);
         }} catch (err) {{
-          appendOutput("Stream parse error: " + err);
+          setStatus("Stream parse error: " + err);
         }}
       }};
       chatSource.onerror = () => {{
-        appendOutput("Stream connection dropped.");
+        setStatus("Stream connection dropped.");
         closeChatSource();
       }};
     }}
@@ -421,13 +433,18 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
       }} else if (data.type === "agent_response" || data.type === "agent_correction") {{
         appendTranscript("Agent", data.text);
       }} else if (data.type === "status") {{
-        appendOutput(data.message || "status update");
-      }} else if (data.type === "summary") {{
-        appendOutput(`Summary: you spoke ${{data.user_lines}} lines; agent replied ${{data.agent_lines}} times.`);
+        setStatus(data.message || "Status update");
+      }} else if (data.type === "vocab" && Array.isArray(data.items)) {{
+        renderVocab(data.items, true);
       }} else if (data.type === "error") {{
-        appendOutput("Error: " + data.message);
+        setStatus("Error: " + data.message);
       }} else if (data.type === "done") {{
-        appendOutput(data.exit_code === 0 ? "Chat finished." : "Chat ended with errors.");
+        if (data.exit_code === 0) {{
+          setStatus("Chat saved" + (data.vocab_count ? ` with ${{data.vocab_count}} vocab items.` : "."));
+        }} else {{
+          setStatus("Chat ended with errors.");
+        }}
+        fetchVocab();
         closeChatSource();
       }}
     }}
@@ -436,46 +453,78 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
       closeChatSource();
       try {{
         await fetch("/api/stop-chat", {{ method: "POST" }});
-        appendOutput("Stop signal sent.");
+        setStatus("Stop signal sent.");
       }} catch (err) {{
-        appendOutput("Failed to stop chat: " + err);
+        setStatus("Failed to stop chat: " + err);
       }}
     }}
 
-    form.addEventListener("submit", async (e) => {{
-      e.preventDefault();
-      const args = argsInput.value.trim();
-      appendOutput(`$ python -m chinese_tutor ${{args}}`);
-      try {{
-        const res = await fetch("/api/run", {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-          body: new URLSearchParams({{ args }}),
-        }});
-        if (!res.ok) {{
-          appendOutput("Command failed to start: HTTP " + res.status);
-          return;
-        }}
-        const data = await res.json();
-        if (data.output) appendOutput(data.output.trim());
-        appendOutput(`(exit code ${{data.exit_code}})`);
-      }} catch (err) {{
-        appendOutput("Command error: " + err);
+    function renderVocab(items, prepend = false) {{
+      if (!Array.isArray(items) || !items.length) {{
+        vocabEl.innerHTML = '<div class="muted">No vocab saved yet. Finish a chat to capture new words.</div>';
+        return;
       }}
-    }});
+      if (!prepend) {{
+        vocabEl.innerHTML = "";
+      }} else if (!vocabEl.children.length) {{
+        vocabEl.innerHTML = "";
+      }}
+      const fragment = document.createDocumentFragment();
+      items.forEach((item) => {{
+        const wrapper = document.createElement("div");
+        wrapper.className = "vocab-item";
+
+        const top = document.createElement("div");
+        top.className = "vocab-top";
+
+        const hanzi = document.createElement("span");
+        hanzi.className = "hanzi";
+        hanzi.textContent = item.chinese || "—";
+        top.appendChild(hanzi);
+
+        if (item.pinyin) {{
+          const pinyin = document.createElement("span");
+          pinyin.className = "pinyin";
+          pinyin.textContent = item.pinyin;
+          top.appendChild(pinyin);
+        }}
+
+        const english = document.createElement("div");
+        english.className = "english";
+        english.textContent = item.english || "";
+
+        wrapper.append(top, english);
+
+        if (item.example) {{
+          const example = document.createElement("div");
+          example.className = "muted";
+          example.textContent = item.example;
+          wrapper.appendChild(example);
+        }}
+
+        fragment.appendChild(wrapper);
+      }});
+      if (prepend && vocabEl.children.length) {{
+        vocabEl.insertBefore(fragment, vocabEl.firstChild);
+      }} else {{
+        vocabEl.appendChild(fragment);
+      }}
+    }}
+
+    async function fetchVocab() {{
+      try {{
+        const res = await fetch("/api/vocab?limit=80");
+        const data = await res.json();
+        renderVocab(data.items || []);
+      }} catch (err) {{
+        vocabEl.innerHTML = '<div class="muted">Unable to load vocab right now.</div>';
+      }}
+    }}
 
     startBtn.addEventListener("click", startChat);
     stopBtn.addEventListener("click", stopChat);
-    clearBtn.addEventListener("click", () => {{
-      outputEl.textContent = "";
-      transcriptEl.innerHTML = "";
-    }});
-    document.querySelectorAll(".chip").forEach((chip) => {{
-      chip.addEventListener("click", () => {{
-        argsInput.value = chip.dataset.fill || "";
-        argsInput.focus();
-      }});
-    }});
+    refreshBtn.addEventListener("click", fetchVocab);
+    fetchVocab();
   </script>
 </body>
 </html>
@@ -485,15 +534,26 @@ def _render_page(agent_id_hint: str, agent_id_ready: bool, api_key_ready: bool) 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     agent_id = os.environ.get("AGENT_ID") or ""
-    agent_id_hint = _mask_agent_id(agent_id)
+    agent_id_hint = f"{agent_id[:4]}...{agent_id[-4:]}" if len(agent_id) > 8 else agent_id
     api_key_ready = bool(os.environ.get("ELEVENLABS_API_KEY"))
     return HTMLResponse(_render_page(agent_id_hint, bool(agent_id), api_key_ready))
 
 
-@app.post("/api/run", response_class=JSONResponse)
-async def run_command(args: str = Form("")) -> JSONResponse:
-    output, exit_code = await asyncio.to_thread(_run_cli, args)
-    return JSONResponse({"output": output, "exit_code": exit_code})
+@app.get("/api/vocab", response_class=JSONResponse)
+async def list_vocab(limit: int = 80) -> JSONResponse:
+    rows = await asyncio.to_thread(storage.list_vocab, limit)
+    items = [
+        {
+            "id": row["id"],
+            "english": row["english"],
+            "chinese": row["chinese"],
+            "pinyin": row["pinyin"],
+            "example": row["example"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+    return JSONResponse({"items": items})
 
 
 @app.get("/stream/chat")

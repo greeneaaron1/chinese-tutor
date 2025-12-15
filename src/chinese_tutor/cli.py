@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 from . import extract, storage
 from .elevenlabs_client import run_conversation
-from .review import list_vocab, review_loop
 
 LOG_FORMAT = "%(message)s"
 logger = logging.getLogger(__name__)
@@ -55,17 +54,27 @@ def cmd_chat(args: argparse.Namespace) -> None:
         logger.info("No vocab candidates detected.")
 
 
-def cmd_review(args: argparse.Namespace) -> None:
-    review_loop(limit=args.limit)
+def _format_vocab_row(row) -> str:
+    parts = []
+    if row["chinese"]:
+        parts.append(row["chinese"])
+    if row["pinyin"]:
+        parts.append(f"({row['pinyin']})")
+    if row["english"]:
+        parts.append(f"- {row['english']}")
+    if row["example"]:
+        parts.append(f"例句: {row['example']}")
+    return " ".join(parts) or "(blank)"
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    print("Recent sessions:")
-    for row in storage.list_sessions(limit=args.limit):
-        print(f"- #{row['id']} {row['started_at']} -> {row['ended_at']}: {row['snippet']}")
-    print("\nRecent vocab:")
-    for line in list_vocab(limit=args.limit):
-        print(f"- {line}")
+    rows = storage.list_vocab(limit=args.limit)
+    if not rows:
+        print("No vocabulary captured yet. Run `chat` first.")
+        return
+    print("Vocabulary (newest first):")
+    for row in rows:
+        print(f"- {_format_vocab_row(row)}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,11 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat = sub.add_parser("chat", help="Start a voice chat with the agent")
     chat.set_defaults(func=cmd_chat)
 
-    review = sub.add_parser("review", help="Review unknown words")
-    review.add_argument("--limit", type=int, default=5, help="Number of items to quiz")
-    review.set_defaults(func=cmd_review)
-
-    listing = sub.add_parser("list", help="List recent sessions and vocab")
+    listing = sub.add_parser("list", help="List captured vocabulary")
     listing.add_argument("--limit", type=int, default=10, help="Number of items to list")
     listing.set_defaults(func=cmd_list)
     return parser
